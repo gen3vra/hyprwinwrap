@@ -403,7 +403,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 
     HyprlandAPI::addNotification(PHANDLE, "[hyprwinwrap] Initialized successfully!", CHyprColor{0.2, 1.0, 0.2, 1.0}, 5000);
 
-    return {"hyprwinwrap", "A clone of xwinwrap for Hyprland", "Vaxry", "1.0"};
+    return {"hyprwinwrap", "A clone of xwinwrap for Hyprland", "Genny", "1.1"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT()
