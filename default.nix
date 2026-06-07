@@ -5,14 +5,14 @@
 }:
 hyprlandPlugins.mkHyprlandPlugin {
   pluginName = "hyprwinwrap";
-  version = "0.1";
+  version = "1.1";
   src = ./.;
 
   inherit (hyprland) nativeBuildInputs;
 
   meta = with lib; {
-    homepage = "https://github.com/hyprwm/hyprland-plugins/tree/main/hyprwinwrap";
-    description = "Hyprland version of xwinwrap";
+    homepage = "https://github.com/gen3vra/hyprwinwrap";
+    description = "Display any window as a background wallpaper";
     license = licenses.bsd3;
     platforms = platforms.linux;
   };
