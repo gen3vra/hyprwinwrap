@@ -30,9 +30,9 @@ if hl.plugin.hyprwinwrap ~= nil then
         title = "window-bg",
         layer = 0,
         pos_x = 0,
-        pos_y = 10,
+        pos_y = 0,
         size_x = 100,
-        size_y = 97.5
+        size_y = 97
     })
     -- Second bg window sitting in the centre on top of the first,
     -- useful for showing a visualizer only on a portion of the screen.
@@ -152,7 +152,7 @@ class hi(QLabel):
     def __init__(self):
         super().__init__()
 
-        self.pixmap = QPixmap("debian.png")
+        self.pixmap = QPixmap("image.png") # assuming img next to script
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
