@@ -14,13 +14,6 @@ hyprpm add https://github.com/gen3vra/hyprwinwrap
 hyprpm enable hyprwinwrap
 ```
 
-
-## Features
-
-- Run any program as a background, with the ability to set its position and size in percentages
-- Use a dispatcher to toggle temporary focus — calling it again or changing focus resets it to a background window
-
-
 ## Config (Lua)
 
 Declare background windows with `hl.plugin.hyprwinwrap.window()`. You can call it multiple times to handle multiple windows.
