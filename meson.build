@@ -25,6 +25,8 @@ shared_module(meson.project_name(), src,
     dependency('libudev'),
     dependency('wayland-server'),
     dependency('xkbcommon'),
+    # Match the Lua version Hyprland is built against (5.5), falling back to others.
+    dependency('lua55', 'lua5.5', 'lua-5.5', 'lua5.4', 'lua'),
   ],
   install: true,
 )

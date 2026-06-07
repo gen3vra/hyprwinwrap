@@ -29,6 +29,12 @@
 #include <hyprland/src/config/values/ConfigValues.hpp>
 #include "globals.hpp"
 
+extern "C"
+{
+#include <lua.h>
+#include <lauxlib.h>
+}
+
 // Do NOT change this function
 APICALL EXPORT std::string PLUGIN_API_VERSION()
 {
@@ -41,10 +47,26 @@ inline CFunctionHook *commitHook = nullptr;
 typedef void (*origCommitSubsurface)(Desktop::View::CSubsurface *thisptr);
 typedef void (*origCommit)(void *owner, void *data);
 
+// bg window object
+struct SBgWindowSpec
+{
+    std::string className; // exact match
+    std::string title;     // exact match
+    int layer = 0;         // render order
+    float posX = 0.f, posY = 0.f, sizeX = 100.f, sizeY = 100.f;
+};
+
 std::vector<PHLWINDOWREF> bgWindows;
 std::vector<SP<Desktop::Rule::IRule>> bgRules;
 std::unordered_map<PHLWINDOW, bool> interactableStates;
 bool anyInteractive = false;
+
+// Specs registered via the Lua window() function during config evaluation.
+static std::vector<SBgWindowSpec> gLuaSpecs;
+// Legacy + Lua specs merged into one list, rebuilt on each config reload.
+static std::vector<SBgWindowSpec> gMergedSpecs;
+// Geometry of each matched background window, so it can be re-applied later.
+static std::unordered_map<PHLWINDOW, SBgWindowSpec> gWindowSpecs;
 
 static SP<Config::Values::CStringValue> gCfgClass;
 static SP<Config::Values::CStringValue> gCfgTitle;
@@ -75,46 +97,56 @@ static void clearWindowRules()
     bgRules.clear();
 }
 
+// Parse a CStringValue into a float, leaving the fallback untouched on failure.
+static float parseFloatOr(const SP<Config::Values::CStringValue> &val, float fallback)
+{
+    try
+    {
+        return std::stof(val->value());
+    }
+    catch (...)
+    {
+        return fallback;
+    }
+}
+
+// Build the unified list of background window specs: the legacy hyprlang config followed by every spec registered via the Lua API.
+static std::vector<SBgWindowSpec> collectSpecs()
+{
+    std::vector<SBgWindowSpec> specs;
+
+    const std::string legacyClass(gCfgClass->value());
+    const std::string legacyTitle(gCfgTitle->value());
+    if (!legacyClass.empty() || !legacyTitle.empty())
+    {
+        SBgWindowSpec legacy;
+        legacy.className = legacyClass;
+        legacy.title = legacyTitle;
+        legacy.sizeX = parseFloatOr(gCfgSizeX, 100.f);
+        legacy.sizeY = parseFloatOr(gCfgSizeY, 100.f);
+        legacy.posX = parseFloatOr(gCfgPosX, 0.f);
+        legacy.posY = parseFloatOr(gCfgPosY, 0.f);
+        specs.push_back(legacy);
+    }
+
+    specs.insert(specs.end(), gLuaSpecs.begin(), gLuaSpecs.end());
+    return specs;
+}
+
 static void applyBgWindowGeometry(PHLWINDOW pWindow)
 {
     const auto PMONITOR = pWindow->m_monitor.lock();
     if (!PMONITOR)
         return;
 
-    float sx = 100.f, sy = 100.f, px = 0.f, py = 0.f;
-    try
-    {
-        sx = std::stof(gCfgSizeX->value());
-    }
-    catch (...)
-    {
-    }
-    try
-    {
-        sy = std::stof(gCfgSizeY->value());
-    }
-    catch (...)
-    {
-    }
-    try
-    {
-        px = std::stof(gCfgPosX->value());
-    }
-    catch (...)
-    {
-    }
-    try
-    {
-        py = std::stof(gCfgPosY->value());
-    }
-    catch (...)
-    {
-    }
+    static const SBgWindowSpec kDefault{};
+    const auto it = gWindowSpecs.find(pWindow);
+    const SBgWindowSpec &spec = it != gWindowSpecs.end() ? it->second : kDefault;
 
-    sx = std::clamp(sx, 1.f, 100.f);
-    sy = std::clamp(sy, 1.f, 100.f);
-    px = std::clamp(px, 0.f, 100.f);
-    py = std::clamp(py, 0.f, 100.f);
+    float sx = std::clamp(spec.sizeX, 1.f, 100.f);
+    float sy = std::clamp(spec.sizeY, 1.f, 100.f);
+    float px = std::clamp(spec.posX, 0.f, 100.f);
+    float py = std::clamp(spec.posY, 0.f, 100.f);
 
     if (px + sx > 100.f)
         sx = 100.f - px;
@@ -139,18 +171,26 @@ static void applyBgWindowGeometry(PHLWINDOW pWindow)
 
 void onNewWindow(PHLWINDOW pWindow)
 {
-    const std::string classRule(gCfgClass->value());
-    const std::string titleRule(gCfgTitle->value());
+    const SBgWindowSpec *matched = nullptr;
+    for (const auto &spec : gMergedSpecs)
+    {
+        const bool classMatches = !spec.className.empty() && pWindow->m_initialClass == spec.className;
+        const bool titleMatches = !spec.title.empty() && pWindow->m_title == spec.title;
+        if (classMatches || titleMatches)
+        {
+            matched = &spec;
+            break;
+        }
+    }
 
-    const bool classMatches = !classRule.empty() && pWindow->m_initialClass == classRule;
-    const bool titleMatches = !titleRule.empty() && pWindow->m_title == titleRule;
-
-    if (!classMatches && !titleMatches)
+    if (!matched)
         return;
 
     const auto PMONITOR = pWindow->m_monitor.lock();
     if (!PMONITOR)
         return;
+
+    gWindowSpecs[pWindow] = *matched;
 
     auto target = pWindow->layoutTarget();
     if (!target->floating())
@@ -166,7 +206,20 @@ void onNewWindow(PHLWINDOW pWindow)
     pWindow->m_pinned = true;
 
     interactableStates[pWindow] = false;
-    bgWindows.push_back(pWindow);
+
+    // Insert into bgWindows keeping it sorted ascending by layer, so onRenderStage can iterate as is
+    const int newLayer = matched->layer;
+    const auto pos = std::upper_bound(bgWindows.begin(), bgWindows.end(), newLayer,
+                                      [](int layer, const PHLWINDOWREF &ref)
+                                      {
+                                          const auto w = ref.lock();
+                                          if (!w)
+                                              return false; // expired: keep scanning past it
+                                          const auto it = gWindowSpecs.find(w);
+                                          return layer < (it != gWindowSpecs.end() ? it->second.layer : 0);
+                                      });
+    bgWindows.insert(pos, pWindow);
+
     pWindow->m_hidden = true;
 
     pWindow->m_ruleApplicator->noFocusOverride(Desktop::Types::COverridableVar<bool>(true, Desktop::Types::PRIORITY_SET_PROP));
@@ -179,6 +232,7 @@ void onCloseWindow(PHLWINDOW pWindow)
     std::erase_if(bgWindows, [pWindow](const auto &ref)
                   { return ref.expired() || ref.lock() == pWindow; });
     interactableStates.erase(pWindow);
+    gWindowSpecs.erase(pWindow);
 }
 
 void onRenderStage(eRenderStage stage)
@@ -248,6 +302,7 @@ void onCommit(void *owner, void *data)
     PWINDOW->m_hidden = !interactable;
 }
 
+// TODO: DEPRECATED: Lua focus function idea is better, I'll remove after hyprlang dropped
 SDispatchResult dispatchToggleInteractivity(std::string)
 {
     if (bgWindows.empty())
@@ -293,24 +348,119 @@ SDispatchResult dispatchToggleInteractivity(std::string)
     return SDispatchResult{};
 }
 
+// hl.plugin.hyprwinwrap.window({ class = "...", title = "...", layer = 0,
+//                                pos_x = 0, pos_y = 0, size_x = 100, size_y = 100 })
+static int luaWindow(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+
+    SBgWindowSpec s;
+
+    const auto getStr = [&](const char *key, std::string &out)
+    {
+        lua_getfield(L, 1, key);
+        if (lua_isstring(L, -1))
+            out = lua_tostring(L, -1);
+        lua_pop(L, 1);
+    };
+    const auto getNum = [&](const char *key, float &out)
+    {
+        lua_getfield(L, 1, key);
+        if (lua_isnumber(L, -1))
+            out = static_cast<float>(lua_tonumber(L, -1));
+        lua_pop(L, 1);
+    };
+
+    getStr("class", s.className);
+    getStr("title", s.title);
+
+    lua_getfield(L, 1, "layer");
+    if (lua_isinteger(L, -1))
+        s.layer = static_cast<int>(lua_tointeger(L, -1));
+    lua_pop(L, 1);
+
+    getNum("pos_x", s.posX);
+    getNum("pos_y", s.posY);
+    getNum("size_x", s.sizeX);
+    getNum("size_y", s.sizeY);
+
+    if (s.className.empty() && s.title.empty())
+        return luaL_error(L, "hyprwinwrap.window: requires a 'class' or 'title' field");
+
+    gLuaSpecs.push_back(s);
+    return 0;
+}
+
+// Toggle one bg window's interactivity (focus it / hand focus back).
+static void toggleBgWindow(const PHLWINDOW &bgw)
+{
+    auto it = interactableStates.find(bgw);
+    if (it == interactableStates.end())
+        return;
+
+    it->second = !it->second;
+    bgw->m_hidden = !it->second;
+
+    if (it->second)
+    {
+        bgw->m_ruleApplicator->noFocusOverride(Desktop::Types::COverridableVar<bool>(false, Desktop::Types::PRIORITY_SET_PROP));
+        Desktop::focusState()->fullWindowFocus(bgw, Desktop::FOCUS_REASON_OTHER);
+    }
+    else
+        bgw->m_ruleApplicator->noFocusOverride(Desktop::Types::COverridableVar<bool>(true, Desktop::Types::PRIORITY_SET_PROP));
+
+    anyInteractive = it->second;
+}
+
+// hl.plugin.hyprwinwrap.focus("window-bg")
+// hl.bind("SUPER + B", function() hl.plugin.hyprwinwrap.focus("window-bg") end)
+// hyprctl dispatch 'hl.plugin.hyprwinwrap.focus("window-bg")'
+static int luaFocus(lua_State *L)
+{
+    const std::string match = luaL_checkstring(L, 1);
+
+    // First pass class, then title; toggle whichever matches
+    for (const auto prop : {&Desktop::View::CWindow::m_initialClass, &Desktop::View::CWindow::m_title})
+    {
+        int toggled = 0;
+        for (auto &bg : bgWindows)
+        {
+            const auto bgw = bg.lock();
+            if (bgw && bgw.get()->*prop == match)
+            {
+                toggleBgWindow(bgw);
+                toggled++;
+            }
+        }
+        if (toggled > 0)
+            return 0;
+    }
+
+    return luaL_error(L, "hyprwinwrap.focus: no background window matching '%s'", match.c_str());
+}
+
 void onConfigReloaded()
 {
     clearWindowRules();
 
-    const std::string classRule(gCfgClass->value());
-    if (!classRule.empty())
-    {
-        auto rule = makeWindowRule("hyprwinwrap-class", Desktop::Rule::RULE_PROP_CLASS, classRule);
-        bgRules.emplace_back(rule);
-        Desktop::Rule::ruleEngine()->registerRule(SP<Desktop::Rule::IRule>{rule});
-    }
+    gMergedSpecs = collectSpecs();
 
-    const std::string titleRule(gCfgTitle->value());
-    if (!titleRule.empty())
+    int idx = 0;
+    for (const auto &spec : gMergedSpecs)
     {
-        auto rule = makeWindowRule("hyprwinwrap-title", Desktop::Rule::RULE_PROP_TITLE, titleRule);
-        bgRules.emplace_back(rule);
-        Desktop::Rule::ruleEngine()->registerRule(SP<Desktop::Rule::IRule>{rule});
+        const auto addRule = [&](const char *kind, Desktop::Rule::eRuleProperty prop, const std::string &match)
+        {
+            if (match.empty())
+                return;
+            auto rule = makeWindowRule("hyprwinwrap-" + std::string(kind) + "-" + std::to_string(idx), prop, match);
+            bgRules.emplace_back(rule);
+            Desktop::Rule::ruleEngine()->registerRule(SP<Desktop::Rule::IRule>{rule});
+        };
+
+        addRule("class", Desktop::Rule::RULE_PROP_CLASS, spec.className);
+        addRule("title", Desktop::Rule::RULE_PROP_TITLE, spec.title);
+
+        idx++;
     }
 
     Desktop::Rule::ruleEngine()->updateAllRules();
@@ -338,6 +488,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
                                                                 { onRenderStage(stage); });
     static auto P4 = Event::bus()->m_events.config.reloaded.listen([&]
                                                                    { onConfigReloaded(); });
+    // rebuilt each reload; clear before the config is evaluated.
+    static auto P4b = Event::bus()->m_events.config.preReload.listen([&]
+                                                                     { gLuaSpecs.clear(); });
 
     // Workspace changes can re-apply gap and border settings, shifting the window slightly
     static auto P5 = Event::bus()->m_events.workspace.active.listen([&](PHLWORKSPACE ws)
@@ -366,7 +519,12 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
             bgw->m_hidden = true;
             bgw->m_ruleApplicator->noFocusOverride(Desktop::Types::COverridableVar<bool>(true, Desktop::Types::PRIORITY_SET_PROP));
         }
-        anyInteractive = false; });
+
+        // If the newly focused window is itself an interactive bg window (e.g. during a drag, rawWindowFocus fires with w == bgw), keep anyInteractive set so that the next real focus-away still triggers the untoggle.
+        // TODO: Is this the best way to handle this? I think so: if we drag it to see another window, it goes back to background, and we don't reset pos. then we could toggle it again if wanting to switch back and forth, and it resets on workspace change when assumedly done. side effect resets pos on ws change even if focused
+        const auto wit = interactableStates.find(w);
+        if (wit == interactableStates.end() || !wit->second)
+            anyInteractive = false; });
     HyprlandAPI::addDispatcherV2(PHANDLE, "hyprwinwrap_interactivity", dispatchToggleInteractivity);
 
     auto fns = HyprlandAPI::findFunctionsByName(PHANDLE, "_ZN7Desktop4View11CSubsurface8onCommitEv");
@@ -385,6 +543,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
     if (!hkResult)
         throw std::runtime_error("hyprwinwrap: hooks failed");
 
+    // TODO: DEPRECATED: Probably remove these in favor of just using the Lua API for everything
     gCfgClass = makeShared<Config::Values::CStringValue>("plugin:hyprwinwrap:class", "window class to use as background", "kitty-bg");
     HyprlandAPI::addConfigValueV2(PHANDLE, gCfgClass);
     gCfgTitle = makeShared<Config::Values::CStringValue>("plugin:hyprwinwrap:title", "window title to use as background", "");
@@ -398,6 +557,15 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
     HyprlandAPI::addConfigValueV2(PHANDLE, gCfgPosX);
     gCfgPosY = makeShared<Config::Values::CStringValue>("plugin:hyprwinwrap:pos_y", "background window vertical offset as percentage (0-100)", "0");
     HyprlandAPI::addConfigValueV2(PHANDLE, gCfgPosY);
+
+    // Multiple background windows yay
+    //   hl.plugin.hyprwinwrap.window({ class = "...", layer = 0, pos_x = 0, ... })
+    // Returns false when not running a Lua config
+    HyprlandAPI::addLuaFunction(PHANDLE, "hyprwinwrap", "window", &luaWindow);
+
+    // Toggle interactivity of a bg window, matched by class then title:
+    //   hl.plugin.hyprwinwrap.focus("window-bg")
+    HyprlandAPI::addLuaFunction(PHANDLE, "hyprwinwrap", "focus", &luaFocus);
 
     onConfigReloaded();
 
