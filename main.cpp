@@ -251,6 +251,10 @@ void onRenderStage(eRenderStage stage)
         if (interactable)
             continue; // pinned-always-above Hypr pass handles it on top
 
+        // Hyprland's updateSuspendedStates() sees our perma-hidden window and sends xdg-toplevel.suspended
+        if (bgw->m_suspended)
+            bgw->setSuspended(false);
+
         // cant use setHidden cuz that sends suspended and stuff that would be laggy
         bgw->m_hidden = false;
         g_pHyprRenderer->renderWindow(bgw, g_pHyprRenderer->m_renderData.pMonitor.lock(), Time::steadyNow(), false, Render::RENDER_PASS_ALL, false, true);

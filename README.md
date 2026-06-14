@@ -52,13 +52,13 @@ end
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `class` | string | Window class — **exact match**, not a regex. Use `hyprctl clients` to find it. |
-| `title` | string | Window title — **exact match**, not a regex. |
+| `class` | string | Window class **exact match**, not a regex. Use `hyprctl clients` to find it. |
+| `title` | string | Window title **exact match**, not a regex. |
 | `pos_x` | number | Horizontal position as a percentage of the screen width. |
 | `pos_y` | number | Vertical position as a percentage of the screen height. |
 | `size_x` | number | Width as a percentage of the screen width. |
 | `size_y` | number | Height as a percentage of the screen height. Set to `97` to leave room for a bottom bar. |
-| `layer` | number | Drawing order — higher values render on top of lower values. |
+| `layer` | number | Higher values render on top of lower values. |
 
 ### Focus Dispatcher
 
@@ -120,8 +120,7 @@ hyprctl dispatch hyprwinwrap_interactivity
 
 ## Notes
 
-- Some programs check if they are hidden and may stop rendering (e.g. kitty).
-- If you use an alt-tab script, make sure to skip `m_hidden` windows so they are not cycled to. Example:
+- If you use an alt-tab script (or are designing around hyprwinwrap), make sure to skip `m_hidden` windows so they are not cycled to. Example:
 
 ```sh
 previous_client="$(hyprctl clients -j | jq -r '[.[] | select(.workspace.id == '"$active_workspace"' and .hidden == false)] | sort_by(.focusHistoryID) | nth(1) | .address')"
