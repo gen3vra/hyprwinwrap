@@ -20,7 +20,9 @@ Declare background windows with `hl.plugin.hyprwinwrap.window()`. You can call i
 
 ```lua
 -- example: foot --app-id=window-bg -o colors.alpha=0.0 [path-to-script]
+-- example: kitty --class=window-bg -o background_opacity=0.0 [path-to-script]
 -- example: xterm -class window-bg [path-to-script]
+-- any program will work, use `hyprctl clients` to discover your window's class/title
 
 -- class is an EXACT match and NOT a regex! Use `hyprctl clients` to find it.
 -- You may match on `class` and/or `title`. pos_*/size_* are percentages.
@@ -57,7 +59,7 @@ end
 | `pos_x` | number | Horizontal position as a percentage of the screen width. |
 | `pos_y` | number | Vertical position as a percentage of the screen height. |
 | `size_x` | number | Width as a percentage of the screen width. |
-| `size_y` | number | Height as a percentage of the screen height. Set to `97` to leave room for a bottom bar. |
+| `size_y` | number | Height as a percentage of the screen height. Set to `97` to leave room for a bottom bar, for example. |
 | `layer` | number | Higher values render on top of lower values. |
 
 ### Focus Dispatcher
@@ -189,6 +191,7 @@ Launch via a terminal emulator, for example:
 
 ```sh
 foot --app-id=window-bg -o colors-[dark|light].alpha=0.0 cava.sh
+kitty --class=window-bg -o background_opacity=0.0 cava.sh
 ```
 
 ```sh
@@ -197,4 +200,4 @@ sleep 1 && cava
 ```
 
 > [!NOTE]
-> The `sleep` is required for cava because window resizing happens a few milliseconds after the window opens.
+> The `sleep` is required for cava because window resizing happens a few milliseconds after the window opens and cava will be at the wrong size.
