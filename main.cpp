@@ -26,6 +26,7 @@
 #include <unordered_map>
 #include <hyprland/src/layout/space/Space.hpp>
 #include <hyprland/src/layout/target/Target.hpp>
+#include <hyprland/src/managers/SessionLockManager.hpp>
 #include <hyprland/src/config/values/ConfigValues.hpp>
 #include "globals.hpp"
 
@@ -235,10 +236,23 @@ void onCloseWindow(PHLWINDOW pWindow)
     gWindowSpecs.erase(pWindow);
 }
 
+// Hypr already has solitary rendering path but if we are in solitary rendering (fullscreen) and send a notification for instance, it will exit solitary rendering branch and thus we'll render again without this
+static bool shouldPauseBg(const PHLMONITOR &mon)
+{
+    if (g_pSessionLockManager->isSessionLocked())
+        return true;
+    if (!mon || !mon->m_dpmsStatus)
+        return true;
+    const auto ws = mon->m_activeWorkspace;
+    return ws && ws->m_fullscreenMode == FSMODE_FULLSCREEN;
+}
+
 void onRenderStage(eRenderStage stage)
 {
     if (stage != RENDER_POST_WALLPAPER)
         return;
+
+    const bool pause = shouldPauseBg(g_pHyprRenderer->m_renderData.pMonitor.lock());
 
     for (auto &bg : bgWindows)
     {
@@ -251,6 +265,13 @@ void onRenderStage(eRenderStage stage)
         if (interactable)
             continue; // pinned-always-above Hypr pass handles it on top
 
+        // remove if anyone reports issues with windows freezing in weird scenarios
+        if (pause)
+        {
+            if (!bgw->m_suspended)
+                bgw->setSuspended(true);
+            continue;
+        }
         // Hyprland's updateSuspendedStates() sees our perma-hidden window and sends xdg-toplevel.suspended
         if (bgw->m_suspended)
             bgw->setSuspended(false);
@@ -277,8 +298,7 @@ void onCommitSubsurface(Desktop::View::CSubsurface *thisptr)
     PWINDOW->m_hidden = false;
 
     ((origCommitSubsurface)subsurfaceHook->m_original)(thisptr);
-    if (const auto MON = PWINDOW->m_monitor.lock(); MON)
-        g_pHyprRenderer->damageMonitor(MON);
+    g_pHyprRenderer->damageWindow(PWINDOW);
 
     const bool interactable = interactableStates.contains(PWINDOW) ? interactableStates[PWINDOW] : false;
     PWINDOW->m_hidden = !interactable;
@@ -299,8 +319,7 @@ void onCommit(void *owner, void *data)
     PWINDOW->m_hidden = false;
 
     ((origCommit)commitHook->m_original)(owner, data);
-    if (const auto MON = PWINDOW->m_monitor.lock(); MON)
-        g_pHyprRenderer->damageMonitor(MON);
+    g_pHyprRenderer->damageWindow(PWINDOW);
 
     const bool interactable = interactableStates.contains(PWINDOW) ? interactableStates[PWINDOW] : false;
     PWINDOW->m_hidden = !interactable;
