@@ -594,7 +594,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 
     HyprlandAPI::addNotification(PHANDLE, "[hyprwinwrap] Initialized successfully!", CHyprColor{0.2, 1.0, 0.2, 1.0}, 5000);
 
-    return {"hyprwinwrap", "A clone of xwinwrap for Hyprland", "Genny", "1.1"};
+    return {"hyprwinwrap", "Display any window as a background wallpaper. Can be layered on top of existing wallpapers and supports multiple windows.", "Genny", "1.2"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT()
