@@ -28,6 +28,7 @@
 #include <hyprland/src/layout/target/Target.hpp>
 #include <hyprland/src/managers/SessionLockManager.hpp>
 #include <hyprland/src/config/values/ConfigValues.hpp>
+#include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include "globals.hpp"
 
 extern "C"
@@ -202,8 +203,6 @@ void onNewWindow(PHLWINDOW pWindow)
 
     applyBgWindowGeometry(pWindow);
 
-    pWindow->m_size = pWindow->m_realSize->value();
-    pWindow->m_position = pWindow->m_realPosition->value();
     pWindow->m_pinned = true;
 
     interactableStates[pWindow] = false;
@@ -243,8 +242,7 @@ static bool shouldPauseBg(const PHLMONITOR &mon)
         return true;
     if (!mon || !mon->m_dpmsStatus)
         return true;
-    const auto ws = mon->m_activeWorkspace;
-    return ws && ws->m_fullscreenMode == FSMODE_FULLSCREEN;
+    return Fullscreen::controller()->getFullscreenModes(mon).internal == Fullscreen::FSMODE_FULLSCREEN;
 }
 
 void onRenderStage(eRenderStage stage)
