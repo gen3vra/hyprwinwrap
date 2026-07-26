@@ -223,6 +223,8 @@ void onNewWindow(PHLWINDOW pWindow)
     pWindow->m_hidden = true;
 
     pWindow->m_ruleApplicator->noFocusOverride(Desktop::Types::COverridableVar<bool>(true, Desktop::Types::PRIORITY_SET_PROP));
+    // Hypr 0.56: unmap takes a close-anim snapshot while onCommit has us momentarily unhidden and we see a flash on window kill
+    pWindow->m_ruleApplicator->noAnimOverride(Desktop::Types::COverridableVar<bool>(true, Desktop::Types::PRIORITY_SET_PROP));
 
     g_pInputManager->refocus();
 }
