@@ -203,8 +203,6 @@ void onNewWindow(PHLWINDOW pWindow)
 
     applyBgWindowGeometry(pWindow);
 
-    pWindow->m_reportedSize = pWindow->m_realSize->value();
-    pWindow->m_reportedPosition = pWindow->m_realPosition->value();
     pWindow->m_pinned = true;
 
     interactableStates[pWindow] = false;
