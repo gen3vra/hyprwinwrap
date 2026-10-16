@@ -61,6 +61,37 @@ end
 | `size_x` | number | Width as a percentage of the screen width. Any Lua expression works, like `200 / (1 + math.sqrt(5))` for a golden ratio window :D (61.8% ish) |
 | `size_y` | number | Height as a percentage of the screen height. `100 * 1000 / 1080` gives exactly 1000px on a 1080p screen. |
 | `layer` | number | Higher values render on top of lower values. |
+| `monitor` | string | Monitor name or selector (`DP-1`, `desc:...`). Omit to keep the monitor the window opened on. |
+| `opacity` | number | 0 to 1. Wins over any window rule. See [Opacity](#opacity). |
+
+### Opacity
+
+Background windows do **not** follow Hyprland's normal opacity: global rules, non-override rules and `decoration:inactive_opacity` are ignored so a blanket `opacity = "1.0 0.8"` never dims a Hyprwinwrap window. With no `opacity` key and no override rule the window renders fully opaque. Two things apply, in this order:
+
+1. `opacity = 0.5` on the `window({...})` spec.
+2. A window rule with `override`:
+
+```lua
+hl.window_rule({
+    match = {class = "window-bg2"},
+    opacity = "0.5 override"
+})
+```
+
+```lua
+hl.plugin.hyprwinwrap.window({
+    class = "window-bg2",
+    title = "window-bg2",
+    layer = 1,
+    pos_x = 25,
+    pos_y = 25,
+    size_x = 50,
+    size_y = 50,
+    opacity = 0.5
+})
+```
+
+The same opacity stays in effect while the window is toggled interactive.
 
 ### Focus Dispatcher
 

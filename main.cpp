@@ -23,13 +23,19 @@
 #undef private
 #undef protected
 
+#include <algorithm>
+#include <optional>
 #include <unordered_map>
 #include <hyprland/src/layout/space/Space.hpp>
 #include <hyprland/src/layout/target/Target.hpp>
 #include <hyprland/src/managers/SessionLockManager.hpp>
 #include <hyprland/src/config/values/ConfigValues.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
+#include <hyprland/src/desktop/state/GlobalWindowController.hpp>
+#include <hyprland/src/state/MonitorState.hpp>
+#include <hyprland/src/state/MonitorQuery.hpp>
 #include "globals.hpp"
+#include "bgrender.hpp"
 
 extern "C"
 {
@@ -56,6 +62,8 @@ struct SBgWindowSpec
     std::string title;     // exact match
     int layer = 0;         // render order
     double posX = 0.0, posY = 0.0, sizeX = 100.0, sizeY = 100.0;
+    std::string monitor;
+    std::optional<double> opacity;
 };
 
 std::vector<PHLWINDOWREF> bgWindows;
@@ -141,6 +149,56 @@ static std::vector<SBgWindowSpec> collectSpecs()
     return specs;
 }
 
+static bool isBgWindow(const PHLWINDOW &pWindow)
+{
+    return std::ranges::any_of(bgWindows, [&](const auto &ref)
+                               { return ref.lock() == pWindow; });
+}
+
+static const SBgWindowSpec *findSpecMatchingWindow(const PHLWINDOW &pWindow)
+{
+    for (const auto &spec : gMergedSpecs)
+    {
+        const bool classMatches = !spec.className.empty() && pWindow->m_initialClass == spec.className;
+        const bool titleMatches = !spec.title.empty() && pWindow->m_title == spec.title;
+        if (classMatches || titleMatches)
+            return &spec;
+    }
+    return nullptr;
+}
+
+static int layerOfBgWindow(const PHLWINDOWREF &ref)
+{
+    const auto w = ref.lock();
+    if (!w)
+        return 0;
+    const auto it = gWindowSpecs.find(w);
+    return it != gWindowSpecs.end() ? it->second.layer : 0;
+}
+
+static void storeBgWindowSpec(const PHLWINDOW &pWindow, const SBgWindowSpec &spec)
+{
+    gWindowSpecs[pWindow] = spec;
+    BgRender::setWindowOverrides(pWindow, {.opacity = spec.opacity});
+}
+
+static void moveBgWindowToMonitor(const PHLWINDOW &pWindow, const std::string &monitor)
+{
+    if (monitor.empty())
+        return;
+
+    const auto PMONITOR = State::CMonitorQuery(*State::monitorState()).selector(monitor).run();
+    if (!PMONITOR)
+    {
+        HyprlandAPI::addNotification(PHANDLE, "[hyprwinwrap] No monitor matches '" + monitor + "'", CHyprColor{1.0, 1.0, 0.2, 1.0}, 5000);
+        return;
+    }
+    if (pWindow->m_monitor.lock() == PMONITOR || !PMONITOR->m_activeWorkspace)
+        return;
+
+    Desktop::globalWindowController()->moveWindowToWorkspace(pWindow, PMONITOR->m_activeWorkspace);
+}
+
 static void applyBgWindowGeometry(PHLWINDOW pWindow)
 {
     const auto PMONITOR = pWindow->m_monitor.lock();
@@ -179,26 +237,17 @@ static void applyBgWindowGeometry(PHLWINDOW pWindow)
 
 void onNewWindow(PHLWINDOW pWindow)
 {
-    const SBgWindowSpec *matched = nullptr;
-    for (const auto &spec : gMergedSpecs)
-    {
-        const bool classMatches = !spec.className.empty() && pWindow->m_initialClass == spec.className;
-        const bool titleMatches = !spec.title.empty() && pWindow->m_title == spec.title;
-        if (classMatches || titleMatches)
-        {
-            matched = &spec;
-            break;
-        }
-    }
-
+    const SBgWindowSpec *matched = findSpecMatchingWindow(pWindow);
     if (!matched)
         return;
+
+    moveBgWindowToMonitor(pWindow, matched->monitor);
 
     const auto PMONITOR = pWindow->m_monitor.lock();
     if (!PMONITOR)
         return;
 
-    gWindowSpecs[pWindow] = *matched;
+    storeBgWindowSpec(pWindow, *matched);
 
     auto target = pWindow->layoutTarget();
     if (!target->floating())
@@ -214,16 +263,9 @@ void onNewWindow(PHLWINDOW pWindow)
     interactableStates[pWindow] = false;
 
     // Insert into bgWindows keeping it sorted ascending by layer, so onRenderStage can iterate as is
-    const int newLayer = matched->layer;
-    const auto pos = std::upper_bound(bgWindows.begin(), bgWindows.end(), newLayer,
+    const auto pos = std::upper_bound(bgWindows.begin(), bgWindows.end(), matched->layer,
                                       [](int layer, const PHLWINDOWREF &ref)
-                                      {
-                                          const auto w = ref.lock();
-                                          if (!w)
-                                              return false; // expired: keep scanning past it
-                                          const auto it = gWindowSpecs.find(w);
-                                          return layer < (it != gWindowSpecs.end() ? it->second.layer : 0);
-                                      });
+                                      { return ref.lock() && layer < layerOfBgWindow(ref); });
     bgWindows.insert(pos, pWindow);
 
     pWindow->m_hidden = true;
@@ -241,6 +283,7 @@ void onCloseWindow(PHLWINDOW pWindow)
                   { return ref.expired() || ref.lock() == pWindow; });
     interactableStates.erase(pWindow);
     gWindowSpecs.erase(pWindow);
+    BgRender::clearWindowOverrides(pWindow);
 }
 
 // Hypr already has solitary rendering path but if we are in solitary rendering (fullscreen) and send a notification for instance, it will exit solitary rendering branch and thus we'll render again without this
@@ -293,8 +336,7 @@ void onCommitSubsurface(Desktop::View::CSubsurface *thisptr)
 {
     const auto PWINDOW = Desktop::View::CWindow::fromView(thisptr->wlSurface()->view());
 
-    if (!PWINDOW || std::find_if(bgWindows.begin(), bgWindows.end(), [PWINDOW](const auto &ref)
-                                 { return ref.lock() == PWINDOW; }) == bgWindows.end())
+    if (!PWINDOW || !isBgWindow(PWINDOW))
     {
         ((origCommitSubsurface)subsurfaceHook->m_original)(thisptr);
         return;
@@ -314,8 +356,7 @@ void onCommit(void *owner, void *data)
 {
     const auto PWINDOW = ((Desktop::View::CWindow *)owner)->m_self.lock();
 
-    if (std::find_if(bgWindows.begin(), bgWindows.end(), [PWINDOW](const auto &ref)
-                     { return ref.lock() == PWINDOW; }) == bgWindows.end())
+    if (!isBgWindow(PWINDOW))
     {
         ((origCommit)commitHook->m_original)(owner, data);
         return;
@@ -377,8 +418,8 @@ SDispatchResult dispatchToggleInteractivity(std::string)
     return SDispatchResult{};
 }
 
-// hl.plugin.hyprwinwrap.window({ class = "...", title = "...", layer = 0,
-//                                pos_x = 0, pos_y = 0, size_x = 100, size_y = 100 })
+// hl.plugin.hyprwinwrap.window({ class = "...", title = "...", layer = 0, monitor = "DP-1",
+//                                pos_x = 0, pos_y = 0, size_x = 100, size_y = 100, opacity = 1 })
 static int luaWindow(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
@@ -412,6 +453,13 @@ static int luaWindow(lua_State *L)
     getNum("pos_y", s.posY);
     getNum("size_x", s.sizeX);
     getNum("size_y", s.sizeY);
+
+    getStr("monitor", s.monitor);
+
+    lua_getfield(L, 1, "opacity");
+    if (lua_isnumber(L, -1))
+        s.opacity = std::clamp(lua_tonumber(L, -1), 0.0, 1.0);
+    lua_pop(L, 1);
 
     if (s.className.empty() && s.title.empty())
         return luaL_error(L, "hyprwinwrap.window: requires a 'class' or 'title' field");
@@ -493,6 +541,19 @@ void onConfigReloaded()
     }
 
     Desktop::Rule::ruleEngine()->updateAllRules();
+
+    std::erase_if(bgWindows, [](const auto &ref)
+                  { return ref.expired(); });
+    for (auto &bg : bgWindows)
+    {
+        const auto bgw = bg.lock();
+        if (const auto spec = findSpecMatchingWindow(bgw))
+            storeBgWindowSpec(bgw, *spec);
+        BgRender::reapplyWindowRulesToHiddenWindow(bgw);
+        applyBgWindowGeometry(bgw);
+        g_pHyprRenderer->damageWindow(bgw);
+    }
+    std::ranges::stable_sort(bgWindows, {}, layerOfBgWindow);
 }
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
@@ -572,6 +633,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
     if (!hkResult)
         throw std::runtime_error("hyprwinwrap: hooks failed");
 
+    BgRender::installSurfacePassHook(PHANDLE);
+
     // TODO: DEPRECATED: Probably remove these in favor of just using the Lua API for everything
     gCfgClass = makeShared<Config::Values::CStringValue>("plugin:hyprwinwrap:class", "window class to use as background", "kitty-bg");
     HyprlandAPI::addConfigValueV2(PHANDLE, gCfgClass);
@@ -600,7 +663,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
 
     HyprlandAPI::addNotification(PHANDLE, "[hyprwinwrap] Initialized successfully!", CHyprColor{0.2, 1.0, 0.2, 1.0}, 5000);
 
-    return {"hyprwinwrap", "Display any window as a background wallpaper. Can be layered on top of existing wallpapers and supports multiple windows.", "Genny", "1.2"};
+    return {"hyprwinwrap", "Display any window as a background wallpaper. Can be layered on top of existing wallpapers and supports multiple windows.", "Genny", "1.3"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT()
