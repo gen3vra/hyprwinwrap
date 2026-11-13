@@ -7,7 +7,7 @@
 
 #define private public
 #define protected public
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
 #include <hyprland/src/render/pass/SurfacePassElement.hpp>
 #undef private

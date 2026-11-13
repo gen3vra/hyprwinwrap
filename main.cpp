@@ -10,7 +10,7 @@
 #define private public
 #define protected public
 #include <hyprland/src/Compositor.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/desktop/rule/Engine.hpp>
@@ -53,7 +53,7 @@ APICALL EXPORT std::string PLUGIN_API_VERSION()
 inline CFunctionHook *subsurfaceHook = nullptr;
 inline CFunctionHook *commitHook = nullptr;
 typedef void (*origCommitSubsurface)(Desktop::View::CSubsurface *thisptr);
-typedef void (*origCommit)(void *owner, void *data);
+typedef void (*origCommit)(void *owner, bool initialCommit);
 
 // bg window object
 struct SBgWindowSpec
@@ -159,8 +159,8 @@ static const SBgWindowSpec *findSpecMatchingWindow(const PHLWINDOW &pWindow)
 {
     for (const auto &spec : gMergedSpecs)
     {
-        const bool classMatches = !spec.className.empty() && pWindow->m_initialClass == spec.className;
-        const bool titleMatches = !spec.title.empty() && pWindow->m_title == spec.title;
+        const bool classMatches = !spec.className.empty() && pWindow->metadata().initialAppID() == spec.className;
+        const bool titleMatches = !spec.title.empty() && pWindow->metadata().title() == spec.title;
         if (classMatches || titleMatches)
             return &spec;
     }
@@ -230,8 +230,8 @@ static void applyBgWindowGeometry(PHLWINDOW pWindow)
     target->setPositionGlobal(b);
     target->warpPositionSize();
 
-    pWindow->m_realSize->setValueAndWarp(newSize);
-    pWindow->m_realPosition->setValueAndWarp(newPos);
+    pWindow->sizeAnimation()->setValueAndWarp(newSize);
+    pWindow->positionAnimation()->setValueAndWarp(newPos);
     pWindow->sendWindowSize(true);
 }
 
@@ -251,14 +251,11 @@ void onNewWindow(PHLWINDOW pWindow)
 
     auto target = pWindow->layoutTarget();
     if (!target->floating())
-    {
         target->setFloating(true);
-        pWindow->m_isFloating = true;
-    }
 
     applyBgWindowGeometry(pWindow);
 
-    pWindow->m_pinned = true;
+    pWindow->m_state |= Desktop::View::WINDOW_STATE_PINNED;
 
     interactableStates[pWindow] = false;
 
@@ -296,18 +293,19 @@ static bool shouldPauseBg(const PHLMONITOR &mon)
     return Fullscreen::controller()->getFullscreenModes(mon).internal == Fullscreen::FSMODE_FULLSCREEN;
 }
 
-void onRenderStage(eRenderStage stage)
+void onRenderStage(const Event::SRenderStageEvent &event)
 {
-    if (stage != RENDER_POST_WALLPAPER)
+    if (event.stage != RENDER_POST_WALLPAPER || !event.context || !event.monitor)
         return;
 
-    const bool pause = shouldPauseBg(g_pHyprRenderer->m_renderData.pMonitor.lock());
+    Render::CRenderContext &ctx = event.context->get();
+    const bool pause = shouldPauseBg(event.monitor);
 
     for (auto &bg : bgWindows)
     {
         const auto bgw = bg.lock();
 
-        if (bgw->m_monitor != g_pHyprRenderer->m_renderData.pMonitor)
+        if (bgw->m_monitor != event.monitor)
             continue;
 
         const bool interactable = interactableStates.contains(bgw) ? interactableStates[bgw] : false;
@@ -327,7 +325,7 @@ void onRenderStage(eRenderStage stage)
 
         // cant use setHidden cuz that sends suspended and stuff that would be laggy
         bgw->m_hidden = false;
-        g_pHyprRenderer->renderWindow(bgw, g_pHyprRenderer->m_renderData.pMonitor.lock(), Time::steadyNow(), false, Render::RENDER_PASS_ALL, false, true);
+        g_pHyprRenderer->renderWindow(ctx, bgw, event.monitor, Render::SWindowRenderPresentation{}, Time::steadyNow(), false, Render::RENDER_PASS_ALL, false, true);
         bgw->m_hidden = true;
     }
 }
@@ -352,20 +350,20 @@ void onCommitSubsurface(Desktop::View::CSubsurface *thisptr)
     PWINDOW->m_hidden = !interactable;
 }
 
-void onCommit(void *owner, void *data)
+void onCommit(void *owner, bool initialCommit)
 {
     const auto PWINDOW = ((Desktop::View::CWindow *)owner)->m_self.lock();
 
     if (!isBgWindow(PWINDOW))
     {
-        ((origCommit)commitHook->m_original)(owner, data);
+        ((origCommit)commitHook->m_original)(owner, initialCommit);
         return;
     }
 
     // cant use setHidden cuz that sends suspended and stuff that would be laggy
     PWINDOW->m_hidden = false;
 
-    ((origCommit)commitHook->m_original)(owner, data);
+    ((origCommit)commitHook->m_original)(owner, initialCommit);
     g_pHyprRenderer->damageWindow(PWINDOW);
 
     const bool interactable = interactableStates.contains(PWINDOW) ? interactableStates[PWINDOW] : false;
@@ -497,13 +495,13 @@ static int luaFocus(lua_State *L)
     const std::string match = luaL_checkstring(L, 1);
 
     // First pass class, then title; toggle whichever matches
-    for (const auto prop : {&Desktop::View::CWindow::m_initialClass, &Desktop::View::CWindow::m_title})
+    for (const auto prop : {&Desktop::View::CWindowMetadata::initialAppID, &Desktop::View::CWindowMetadata::title})
     {
         int toggled = 0;
         for (auto &bg : bgWindows)
         {
             const auto bgw = bg.lock();
-            if (bgw && bgw.get()->*prop == match)
+            if (bgw && (bgw->metadata().*prop)() == match)
             {
                 toggleBgWindow(bgw);
                 toggled++;
@@ -574,8 +572,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
                                                               { onNewWindow(w); });
     static auto P2 = Event::bus()->m_events.window.close.listen([&](PHLWINDOW w)
                                                                 { onCloseWindow(w); });
-    static auto P3 = Event::bus()->m_events.render.stage.listen([&](eRenderStage stage)
-                                                                { onRenderStage(stage); });
+    static auto P3 = Event::bus()->m_events.render.stage.listen([&](const Event::SRenderStageEvent &event)
+                                                                { onRenderStage(event); });
     static auto P4 = Event::bus()->m_events.config.reloaded.listen([&]
                                                                    { onConfigReloaded(); });
     // rebuilt each reload; clear before the config is evaluated.
@@ -622,7 +620,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle)
         throw std::runtime_error("hyprwinwrap: onCommit not found");
     subsurfaceHook = HyprlandAPI::createFunctionHook(PHANDLE, fns[0].address, (void *)&onCommitSubsurface);
 
-    fns = HyprlandAPI::findFunctionsByName(PHANDLE, "_ZN7Desktop4View7CWindow12commitWindowEv");
+    fns = HyprlandAPI::findFunctionsByName(PHANDLE, "_ZN7Desktop4View7CWindow12commitWindowEb");
     if (fns.size() < 1)
         throw std::runtime_error("hyprwinwrap: listener_commitWindow not found");
     commitHook = HyprlandAPI::createFunctionHook(PHANDLE, fns[0].address, (void *)&onCommit);
